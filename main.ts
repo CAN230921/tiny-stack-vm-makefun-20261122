@@ -72,7 +72,7 @@ export function run(code: Buffer, input: Buffer) {
   try {
     for (let step = 0; step < 1e6; step++) {
       const op = code[pc++] ?? stop(9);
-      const calculate = alu[op - 0x10];
+      const calculate = op >= 0x10 && op <= 0x22 && alu[op - 0x10];
       if (calculate) {
         const b = op === 0x17 || op === 0x1b ? 0 : pop();
         const a = pop();
