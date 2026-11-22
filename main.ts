@@ -1,11 +1,45 @@
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 
+type Binary = (left: number, right: number) => number;
+// One slot per opcode starting at ADD (0x10). Unary and unused slots stay empty.
+const binary: (Binary | null)[] = [
+  (a, b) => a + b,
+  (a, b) => a - b,
+  Math.imul,
+  (a, b) => a / b,
+  (a, b) => a % b,
+  (a, b) => (a >>> 0) / (b >>> 0),
+  (a, b) => (a >>> 0) % (b >>> 0),
+  null,
+  (a, b) => a & b,
+  (a, b) => a | b,
+  (a, b) => a ^ b,
+  null,
+  (a, b) => a << b,
+  (a, b) => a >> b,
+  (a, b) => a >>> b,
+  null,
+  (a, b) => +(a === b),
+  (a, b) => +(a < b),
+  (a, b) => +((a >>> 0) < (b >>> 0)),
+];
+
+function address(value: number) {
+  if (value >>> 8) throw 6;
+  return value;
+}
+
 export function run(code: Buffer, input: Buffer) {
   const stack = new Int32Array(256);
   const memory = new Int32Array(256);
   const returns = new Uint16Array(64);
   const output = Buffer.allocUnsafe(65536);
   let pc = 0, depth = 0, calls = 0, read = 0, written = 0;
+
+  function peek(distance: number) {
+    if (depth < distance) throw 2;
+    return stack[depth - distance];
+  }
 
   function pop() {
     if (!depth) throw 2;
@@ -24,12 +58,6 @@ export function run(code: Buffer, input: Buffer) {
     return value;
   }
 
-  function address() {
-    const value = pop();
-    if (value >>> 8) throw 6;
-    return value;
-  }
-
   function result(exit: number) {
     return { exit, stdout: output.subarray(0, written) };
   }
@@ -43,25 +71,14 @@ export function run(code: Buffer, input: Buffer) {
         case 0x01: push(immediate(1)); break;
         case 0x02: push(immediate(4)); break;
         case 0x03: pop(); break;
-        case 0x04: {
-          const a = pop();
-          push(a);
-          push(a);
-          break;
-        }
+        case 0x04: push(peek(1)); break;
         case 0x05: {
           const b = pop(), a = pop();
           push(b);
           push(a);
           break;
         }
-        case 0x06: {
-          const b = pop(), a = pop();
-          push(a);
-          push(b);
-          push(a);
-          break;
-        }
+        case 0x06: push(peek(2)); break;
         case 0x07: {
           const c = pop(), b = pop(), a = pop();
           push(b);
@@ -89,11 +106,10 @@ export function run(code: Buffer, input: Buffer) {
           if (!calls) throw 8;
           pc = returns[--calls];
           break;
-        case 0x40: push(memory[address()]); break;
+        case 0x40: push(memory[address(pop())]); break;
         case 0x41: {
           const addr = pop(), value = pop();
-          if (addr >>> 8) throw 6;
-          memory[addr] = value;
+          memory[address(addr)] = value;
           break;
         }
         case 0x50: {
@@ -108,30 +124,14 @@ export function run(code: Buffer, input: Buffer) {
           output[written++] = value;
           break;
         }
-        case 0x52: push(input[read] ?? -1); read++; break;
+        case 0x52: push(read < input.length ? input[read++] : -1); break;
         case 0x53: return result(pop() & 255);
         default: {
-          if (op < 0x10 || op > 0x22 || op === 0x1f) throw 5;
+          const operation = binary[op - 0x10];
+          if (!operation) throw 5;
           const b = pop(), a = pop();
           if (op >= 0x13 && op <= 0x16 && b === 0) throw 4;
-          switch (op) {
-            case 0x10: push(a + b); break;
-            case 0x11: push(a - b); break;
-            case 0x12: push(Math.imul(a, b)); break;
-            case 0x13: push(a / b); break;
-            case 0x14: push(a % b); break;
-            case 0x15: push((a >>> 0) / (b >>> 0)); break;
-            case 0x16: push((a >>> 0) % (b >>> 0)); break;
-            case 0x18: push(a & b); break;
-            case 0x19: push(a | b); break;
-            case 0x1a: push(a ^ b); break;
-            case 0x1c: push(a << b); break;
-            case 0x1d: push(a >> b); break;
-            case 0x1e: push(a >>> b); break;
-            case 0x20: push(+(a === b)); break;
-            case 0x21: push(+(a < b)); break;
-            case 0x22: push(+((a >>> 0) < (b >>> 0))); break;
-          }
+          push(operation(a, b));
         }
       }
     }
