@@ -1,154 +1,101 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import * as fs from 'node:fs';
 
-type Binary = (left: number, right: number) => number;
-// One slot per opcode starting at ADD (0x10). Unary and unused slots stay empty.
-const binary: (Binary | null)[] = [
-  (a, b) => a + b,
-  (a, b) => a - b,
-  Math.imul,
-  (a, b) => a / b,
-  (a, b) => a % b,
-  (a, b) => (a >>> 0) / (b >>> 0),
-  (a, b) => (a >>> 0) % (b >>> 0),
+type Operation = (a: number, b: number) => number;
+
+const alu: (Operation | null)[] = [
+  (a, b) => a + b, (a, b) => a - b, Math.imul,
+  (a, b) => a / b, (a, b) => a % b,
+  (a, b) => (a >>> 0) / (b >>> 0), (a, b) => (a >>> 0) % (b >>> 0),
+  a => -a,
+  (a, b) => a & b, (a, b) => a | b, (a, b) => a ^ b, a => ~a,
+  (a, b) => a << b, (a, b) => a >> b, (a, b) => a >>> b,
   null,
-  (a, b) => a & b,
-  (a, b) => a | b,
-  (a, b) => a ^ b,
-  null,
-  (a, b) => a << b,
-  (a, b) => a >> b,
-  (a, b) => a >>> b,
-  null,
-  (a, b) => +(a === b),
-  (a, b) => +(a < b),
-  (a, b) => +((a >>> 0) < (b >>> 0)),
+  (a, b) => +(a === b), (a, b) => +(a < b), (a, b) => +((a >>> 0) < (b >>> 0)),
 ];
 
-function address(value: number) {
-  if (value >>> 8) throw 6;
-  return value;
-}
+function stop(exit: number): never { throw exit; }
 
 export function run(code: Buffer, input: Buffer) {
-  const stack = new Int32Array(256);
+  const stack: number[] = [], calls: number[] = [];
   const memory = new Int32Array(256);
-  const returns = new Uint16Array(64);
-  const output = Buffer.allocUnsafe(65536);
-  let pc = 0, depth = 0, calls = 0, read = 0, written = 0;
+  const stdout = Buffer.allocUnsafe(65536);
+  let pc = 0, read = 0, written = 0;
+  const pop = () => stack.pop() ?? stop(2);
+  const peek = (depth: number) => stack.at(-depth) ?? stop(2);
+  const push = (value: number) => stack.length === 256 ? stop(3) : stack.push(value | 0);
 
-  function peek(distance: number) {
-    if (depth < distance) throw 2;
-    return stack[depth - distance];
-  }
-
-  function pop() {
-    if (!depth) throw 2;
-    return stack[--depth];
-  }
-
-  function push(value: number) {
-    if (depth === 256) throw 3;
-    stack[depth++] = value;
-  }
-
-  function immediate(width: number, signed = true) {
-    if (pc + width > code.length) throw 9;
-    const value = signed ? code.readIntLE(pc, width) : code.readUIntLE(pc, width);
+  const next = (width: number) => {
     pc += width;
-    return value;
-  }
+    if (pc > code.length) throw 9;
+    return code.readIntLE(pc - width, width);
+  };
+  const rotate = (depth: number) => {
+    const first = peek(depth);
+    stack.copyWithin(-depth, 1 - depth);
+    stack[stack.length - 1] = first;
+  };
+  const branch = (when?: boolean) => {
+    const offset = next(2);
+    if (when === undefined || when === !!pop()) pc += offset;
+  };
+  const call = () => {
+    const dest = next(2) & 65535;
+    if (calls.length === 64) throw 7;
+    calls.push(pc);
+    pc = dest;
+  };
+  const address = (index: number) => index >>> 8 ? stop(6) : index;
+  const store = () => {
+    const index = pop(), value = pop();
+    memory[address(index)] = value;
+  };
+  const emit = (bytes: ArrayLike<number>) => {
+    if (written + bytes.length > stdout.length) throw 11;
+    stdout.set(bytes, written);
+    written += bytes.length;
+  };
 
-  function result(exit: number) {
-    return { exit, stdout: output.subarray(0, written) };
-  }
-
+  // Rows correspond to the high opcode nibble. Arithmetic shares one dispatch path.
+  const groups = [
+    [
+      () => stop(0), () => push(next(1)), () => push(next(4)), pop,
+      () => push(peek(1)), () => rotate(2), () => push(peek(2)), () => rotate(3),
+    ],
+    [], [],
+    [branch, () => branch(false), () => branch(true), call, () => { pc = calls.pop() ?? stop(8); }],
+    [() => push(memory[address(pop())]), store],
+    [
+      () => emit(Buffer.from(String(pop()))), () => emit([pop()]),
+      () => push(input[read++] ?? -1), () => stop(pop() & 255),
+    ],
+  ];
   try {
-    for (let step = 0; step < 1000000; step++) {
-      if (pc < 0 || pc >= code.length) throw 9;
-      const op = code[pc++];
-      switch (op) {
-        case 0x00: return result(0);
-        case 0x01: push(immediate(1)); break;
-        case 0x02: push(immediate(4)); break;
-        case 0x03: pop(); break;
-        case 0x04: push(peek(1)); break;
-        case 0x05: {
-          const b = pop(), a = pop();
-          push(b);
-          push(a);
-          break;
-        }
-        case 0x06: push(peek(2)); break;
-        case 0x07: {
-          const c = pop(), b = pop(), a = pop();
-          push(b);
-          push(c);
-          push(a);
-          break;
-        }
-        case 0x17: push(-pop()); break;
-        case 0x1b: push(~pop()); break;
-        case 0x30:
-        case 0x31:
-        case 0x32: {
-          const delta = immediate(2);
-          if (op === 0x30 || Boolean(pop()) === (op === 0x32)) pc += delta;
-          break;
-        }
-        case 0x33: {
-          const dest = immediate(2, false);
-          if (calls === 64) throw 7;
-          returns[calls++] = pc;
-          pc = dest;
-          break;
-        }
-        case 0x34:
-          if (!calls) throw 8;
-          pc = returns[--calls];
-          break;
-        case 0x40: push(memory[address(pop())]); break;
-        case 0x41: {
-          const addr = pop(), value = pop();
-          memory[address(addr)] = value;
-          break;
-        }
-        case 0x50: {
-          const digits = String(pop());
-          if (written + digits.length > output.length) throw 11;
-          written += output.write(digits, written, 'ascii');
-          break;
-        }
-        case 0x51: {
-          const value = pop();
-          if (written === output.length) throw 11;
-          output[written++] = value;
-          break;
-        }
-        case 0x52: push(read < input.length ? input[read++] : -1); break;
-        case 0x53: return result(pop() & 255);
-        default: {
-          const operation = binary[op - 0x10];
-          if (!operation) throw 5;
-          const b = pop(), a = pop();
-          if (op >= 0x13 && op <= 0x16 && b === 0) throw 4;
-          push(operation(a, b));
-        }
+    for (let step = 0; step < 1e6; step++) {
+      const op = code[pc++] ?? stop(9);
+      const calculate = alu[op - 0x10];
+      if (calculate) {
+        const b = op === 0x17 || op === 0x1b ? 0 : pop();
+        const a = pop();
+        if (op >= 0x13 && op <= 0x16 && b === 0) throw 4;
+        push(calculate(a, b));
+      } else {
+        const handler = groups[op >>> 4]?.[op & 15] ?? stop(5);
+        handler();
       }
     }
-    return result(10);
-  } catch (error) {
-    if (typeof error !== 'number') throw error;
-    return result(error);
+    throw 10;
+  } catch (exit) {
+    if (typeof exit !== 'number') throw exit;
+    return { exit, stdout: stdout.subarray(0, written) };
   }
 }
 
-const inputDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
-const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-for (const id of readdirSync(inputDir)) {
-  const dir = `${inputDir}/${id}`;
-  const { stdout, exit } = run(readFileSync(`${dir}/program.bin`), readFileSync(`${dir}/input.bin`));
-  const destination = `${outputDir}/${id}`;
-  mkdirSync(destination, { recursive: true });
-  writeFileSync(`${destination}/stdout.bin`, stdout);
-  writeFileSync(`${destination}/exit.txt`, String(exit));
+const { MAKEFUN_INPUT_DIR: inputDir = '/input', MAKEFUN_OUTPUT_DIR: outputDir = '/output' } = process.env;
+for (const id of fs.readdirSync(inputDir)) {
+  const read = (file: string) => fs.readFileSync(`${inputDir}/${id}/${file}.bin`);
+  const { exit, stdout } = run(read('program'), read('input'));
+  const dir = outputDir + '/' + id;
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(dir + '/stdout.bin', stdout);
+  fs.writeFileSync(dir + '/exit.txt', String(exit));
 }
