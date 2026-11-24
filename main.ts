@@ -1,7 +1,8 @@
 import fs from 'fs';
 
 // Pop count, then fixed JS.
-const isa = `0trap(0)
+const table=`[[
+0trap(0)
 0read(1)
 0read(4)
 1void 0
@@ -42,25 +43,25 @@ const isa = `0trap(0)
 1emit(''+a)
 1emit(String.fromCharCode(a&255))
 0input[pos++]??-1
-1trap(a&255)`;
+1trap(a&255)
+]]`.replace(/^(\d)(.+)/gm,'[$1,(a,b,c)=>$2],').replace(/\n\n/g,'],[');
 
 export function run(code,input) {
 	const stack=[], calls=[], ram=[];
 	let pc=0, pos=0, imm, out='';
-	const trap = n => { throw n; };
-	const addr = n => n>>8 ? trap(6) : n;
-	const div = b => b||trap(4);
+	const trap=n=>{throw n};
+	const addr=n=>n>>8?trap(6):n;
+	const div=b=>b||trap(4);
 	const read=n=>pc+n>code.length?trap(9):code.readIntLE((pc+=n)-n,n);
-	const emit=t=>{if(out.length+t.length>65536)throw 11;out+=t};
-	const ops=isa.split('\n\n').map(row=>row.split('\n').map(s=>[+s[0],eval('(a,b,c)=>'+s.slice(1))]));
+	const emit=t=>{if((t=out+t).length>65536)throw 11;out=t};
+	const ops=eval(table);
 	try {
 		for (let fuel=1e6; fuel--; ) {
-			const op = code[pc++]??trap(9);
+			const op=code[pc++]??trap(9);
 			const [n,step]=ops[op>>4]?.[op&15]??trap(5);
 			if (op>>2===12) imm=read(2);
 			if (n>stack.length) throw 2;
-			const value=step(...stack.splice(-n,n).map(word=>word|0));
-			stack.push(...[].concat(value??[]));
+			stack.push(...[].concat(step(...stack.splice(-n,n).map(x=>x|0))??[]));
 			if (stack.length>256) throw 3;
 		}
 		throw 10;
