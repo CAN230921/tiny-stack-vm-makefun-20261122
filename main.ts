@@ -50,22 +50,16 @@ export function run(code,input) {
 	const trap = n => { throw n; };
 	const addr = n => n>>8 ? trap(6) : n;
 	const div = b => b||trap(4);
-	const read = n => {
-		pc+=n;
-		if (pc>code.length) throw 9;
-		return code.readIntLE(pc-n,n);
-	};
-	const emit = text => void (out.length+text.length>65536 ? trap(11) : out+=text);
-	const ops = isa.split('\n\n').map(row=>row.split('\n').map(line=>
-		eval(`(${'a,b,c,'.slice(0,line[0]*2)})=>${line.slice(1)}`)));
+	const read=n=>pc+n>code.length?trap(9):code.readIntLE((pc+=n)-n,n);
+	const emit=t=>{if(out.length+t.length>65536)throw 11;out+=t};
+	const ops=isa.split('\n\n').map(row=>row.split('\n').map(s=>[+s[0],eval('(a,b,c)=>'+s.slice(1))]));
 	try {
 		for (let fuel=1e6; fuel--; ) {
 			const op = code[pc++]??trap(9);
-			const step = ops[op>>4]?.[op&15]??trap(5);
+			const [n,step]=ops[op>>4]?.[op&15]??trap(5);
 			if (op>>2===12) imm=read(2);
-			const base=stack.length-step.length;
-			if (base<0) throw 2;
-			const value=step(...stack.splice(base).map(n=>n|0));
+			if (n>stack.length) throw 2;
+			const value=step(...stack.splice(-n,n).map(word=>word|0));
 			stack.push(...[].concat(value??[]));
 			if (stack.length>256) throw 3;
 		}
